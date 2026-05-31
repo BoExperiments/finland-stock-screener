@@ -1,6 +1,7 @@
 """Finland Stock Screener — Nasdaq Helsinki (OMX)"""
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 
 from tickers import HELSINKI_STOCKS, DEFAULT_WATCHLIST
@@ -14,6 +15,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ── Session state defaults ────────────────────────────────────────────────────
+if "chart_ticker" not in st.session_state:
+    st.session_state["chart_ticker"] = "NOKIA.HE"
+if "switch_to_chart" not in st.session_state:
+    st.session_state["switch_to_chart"] = False
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -36,6 +43,23 @@ with st.sidebar:
     if st.button("🔄 Refresh Data", use_container_width=True):
         st.cache_data.clear()
 
+# ── Auto-switch tab via JS when a stock is clicked in the screener ────────────
+def inject_tab_switch():
+    """Inject JS to programmatically click the Chart & Signals tab."""
+    components.html("""
+    <script>
+        // Walk up to the Streamlit parent document and click the second tab
+        function switchTab() {
+            const tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+            if (tabs && tabs.length >= 2) {
+                tabs[1].click();
+            }
+        }
+        // Small delay to let Streamlit finish rendering
+        setTimeout(switchTab, 120);
+    </script>
+    """, height=0)
+
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2 = st.tabs(["📋 Screener", "📈 Chart & Signals"])
 
@@ -44,6 +68,7 @@ tab1, tab2 = st.tabs(["📋 Screener", "📈 Chart & Signals"])
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
     st.header("Stock Screener — Nasdaq Helsinki")
+    st.caption("Click any row to open its chart in the **Chart & Signals** tab.")
 
     ticker_pool = DEFAULT_WATCHLIST if use_default else list(HELSINKI_STOCKS.keys())
 
@@ -78,11 +103,9 @@ with tab1:
         mask = mask & (rsi_mask | df_screen["RSI"].isna())
 
     df_filtered = df_screen[mask].copy()
-
-    # ── Add company names ─────────────────────────────────────────────────────
     df_filtered["Company"] = df_filtered["Ticker"].map(HELSINKI_STOCKS).fillna(df_filtered["Ticker"])
 
-    # ── Display ───────────────────────────────────────────────────────────────
+    # ── Metrics bar ───────────────────────────────────────────────────────────
     col_a, col_b, col_c = st.columns(3)
     col_a.metric("Stocks scanned", len(df_screen))
     col_b.metric("Passed filters", len(df_filtered))
@@ -97,7 +120,11 @@ with tab1:
         st.info("No stocks match current filters. Try relaxing the criteria.")
     else:
         display_cols = ["Ticker", "Company", "Price", "Change %", "Vol/Avg", "RSI"]
-        display_df = df_filtered[display_cols].sort_values("Change %", ascending=False).reset_index(drop=True)
+        display_df = (
+            df_filtered[display_cols]
+            .sort_values("Change %", ascending=False)
+            .reset_index(drop=True)
+        )
 
         def colour_change(val):
             color = "#26a69a" if val >= 0 else "#ef5350"
@@ -116,36 +143,57 @@ with tab1:
         styled = display_df.style
         styled = getattr(styled, style_fn)(colour_change, subset=["Change %"])
         styled = getattr(styled, style_fn)(colour_rsi, subset=["RSI"])
-        styled = styled.format({"Price": "{:.2f}", "Change %": "{:+.2f}%", "Vol/Avg": "{:.2f}x", "RSI": "{:.1f}"})
-        st.dataframe(styled, use_container_width=True, height=500)
+        styled = styled.format({
+            "Price": "{:.2f}",
+            "Change %": "{:+.2f}%",
+            "Vol/Avg": "{:.2f}x",
+            "RSI": "{:.1f}",
+        })
 
-        # ── Quick-select for chart tab ────────────────────────────────────────
-        st.divider()
-        st.subheader("Open in Chart")
-        selected = st.selectbox(
-            "Select a stock to analyse",
-            options=display_df["Ticker"].tolist(),
-            format_func=lambda t: f"{t}  —  {HELSINKI_STOCKS.get(t, t)}",
+        # ── Clickable dataframe — single-row selection ────────────────────────
+        event = st.dataframe(
+            styled,
+            use_container_width=True,
+            height=460,
+            on_select="rerun",
+            selection_mode="single-row",
         )
-        if st.button("📈 Open Chart", use_container_width=True):
-            st.session_state["chart_ticker"] = selected
-            st.info(f"Switch to the **Chart & Signals** tab to view {selected}")
+
+        selected_rows = event.selection.get("rows", []) if event and event.selection else []
+
+        if selected_rows:
+            row_idx = selected_rows[0]
+            clicked_ticker = display_df.iloc[row_idx]["Ticker"]
+            clicked_company = display_df.iloc[row_idx]["Company"]
+
+            # Store in session state and flag the tab switch
+            st.session_state["chart_ticker"] = clicked_ticker
+            st.session_state["switch_to_chart"] = True
+
+            st.success(f"**{clicked_ticker}** — {clicked_company} selected. Switching to Chart tab…")
+            inject_tab_switch()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — CHART & SIGNALS
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab2:
+    # Clear the switch flag once we render this tab
+    st.session_state["switch_to_chart"] = False
+
     st.header("Chart & Technical Signals")
 
     col_left, col_right = st.columns([2, 1])
     with col_left:
-        default_ticker = st.session_state.get("chart_ticker", "NOKIA.HE")
+        current_ticker = st.session_state.get("chart_ticker", "NOKIA.HE")
+        all_tickers = list(HELSINKI_STOCKS.keys())
         ticker_input = st.selectbox(
             "Stock",
-            options=list(HELSINKI_STOCKS.keys()),
-            index=list(HELSINKI_STOCKS.keys()).index(default_ticker) if default_ticker in HELSINKI_STOCKS else 0,
+            options=all_tickers,
+            index=all_tickers.index(current_ticker) if current_ticker in all_tickers else 0,
             format_func=lambda t: f"{t}  —  {HELSINKI_STOCKS.get(t, t)}",
         )
+        # Keep session state in sync if user manually changes the selectbox
+        st.session_state["chart_ticker"] = ticker_input
 
     with col_right:
         timeframe = st.radio(
@@ -183,12 +231,12 @@ with tab2:
     df_chart = generate_signals(df_chart)
 
     # ── KPI bar ───────────────────────────────────────────────────────────────
-    last_price  = df_chart["Close"].iloc[-1]
-    prev_price  = df_chart["Close"].iloc[-2] if len(df_chart) > 1 else last_price
-    change_pct  = (last_price - prev_price) / prev_price * 100
-    last_rsi    = df_chart["RSI"].dropna().iloc[-1] if "RSI" in df_chart.columns else None
-    last_sig    = last_signal(df_chart)
-    atr         = df_chart["ATR"].dropna().iloc[-1] if "ATR" in df_chart.columns else None
+    last_price = df_chart["Close"].iloc[-1]
+    prev_price = df_chart["Close"].iloc[-2] if len(df_chart) > 1 else last_price
+    change_pct = (last_price - prev_price) / prev_price * 100
+    last_rsi   = df_chart["RSI"].dropna().iloc[-1] if "RSI" in df_chart.columns else None
+    last_sig   = last_signal(df_chart)
+    atr        = df_chart["ATR"].dropna().iloc[-1] if "ATR" in df_chart.columns else None
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Last Price", f"€{last_price:.2f}", f"{change_pct:+.2f}%")
@@ -203,20 +251,20 @@ with tab2:
     # ── Signal log ────────────────────────────────────────────────────────────
     if "Signal" in df_chart.columns:
         sig_log = df_chart.dropna(subset=["Signal"])[["Close", "Signal", "RSI", "MACD"]].copy()
-        sig_log.index = sig_log.index.strftime("%Y-%m-%d %H:%M") if hasattr(sig_log.index, "strftime") else sig_log.index
+        sig_log.index = (
+            sig_log.index.strftime("%Y-%m-%d %H:%M")
+            if hasattr(sig_log.index, "strftime") else sig_log.index
+        )
         sig_log.columns = ["Price", "Signal", "RSI", "MACD"]
         if not sig_log.empty:
             st.subheader("Signal History")
             sig_style = sig_log.style
             style_fn2 = "map" if hasattr(sig_style, "map") else "applymap"
             sig_style = getattr(sig_style, style_fn2)(
-                lambda v: "color: #26a69a" if v == "BUY" else "color: #ef5350", subset=["Signal"]
+                lambda v: "color: #26a69a" if v == "BUY" else "color: #ef5350",
+                subset=["Signal"],
             ).format({"Price": "{:.2f}", "RSI": "{:.1f}", "MACD": "{:.4f}"})
-            st.dataframe(
-                sig_style,
-                use_container_width=True,
-                height=200,
-            )
+            st.dataframe(sig_style, use_container_width=True, height=200)
 
     # ── Disclaimer ────────────────────────────────────────────────────────────
     st.divider()
