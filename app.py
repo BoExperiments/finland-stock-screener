@@ -112,12 +112,11 @@ with tab1:
                 return "color: #26a69a"
             return ""
 
-        styled = (
-            display_df.style
-            .applymap(colour_change, subset=["Change %"])
-            .applymap(colour_rsi, subset=["RSI"])
-            .format({"Price": "{:.2f}", "Change %": "{:+.2f}%", "Vol/Avg": "{:.2f}x", "RSI": "{:.1f}"})
-        )
+        style_fn = "map" if hasattr(display_df.style, "map") else "applymap"
+        styled = display_df.style
+        styled = getattr(styled, style_fn)(colour_change, subset=["Change %"])
+        styled = getattr(styled, style_fn)(colour_rsi, subset=["RSI"])
+        styled = styled.format({"Price": "{:.2f}", "Change %": "{:+.2f}%", "Vol/Avg": "{:.2f}x", "RSI": "{:.1f}"})
         st.dataframe(styled, use_container_width=True, height=500)
 
         # ── Quick-select for chart tab ────────────────────────────────────────
@@ -208,10 +207,13 @@ with tab2:
         sig_log.columns = ["Price", "Signal", "RSI", "MACD"]
         if not sig_log.empty:
             st.subheader("Signal History")
+            sig_style = sig_log.style
+            style_fn2 = "map" if hasattr(sig_style, "map") else "applymap"
+            sig_style = getattr(sig_style, style_fn2)(
+                lambda v: "color: #26a69a" if v == "BUY" else "color: #ef5350", subset=["Signal"]
+            ).format({"Price": "{:.2f}", "RSI": "{:.1f}", "MACD": "{:.4f}"})
             st.dataframe(
-                sig_log.style
-                .applymap(lambda v: "color: #26a69a" if v == "BUY" else "color: #ef5350", subset=["Signal"])
-                .format({"Price": "{:.2f}", "RSI": "{:.1f}", "MACD": "{:.4f}"}),
+                sig_style,
                 use_container_width=True,
                 height=200,
             )
